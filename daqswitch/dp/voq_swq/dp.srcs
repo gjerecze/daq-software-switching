@@ -1,0 +1,1 @@
+SRCS-y += dp_voq_swq.c dp_defaults.c dp_lcore_default.c dp_lcore_data_rx.c dp_lcore_data_tx.c

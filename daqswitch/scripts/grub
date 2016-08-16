@@ -1,0 +1,7 @@
+GRUB_TIMEOUT=5
+GRUB_DISTRIBUTOR="$(sed 's, release .*$,,g' /etc/system-release)"
+GRUB_DEFAULT=saved
+GRUB_DISABLE_SUBMENU=true
+GRUB_TERMINAL_OUTPUT="console"
+GRUB_CMDLINE_LINUX="rd.lvm.lv=fedora_gklab-18-159/swap crashkernel=auto vconsole.font=latarcyrheb-sun16 rd.lvm.lv=fedora_gklab-18-159/root $([ -x /usr/sbin/rhcrashkernel-param ] && /usr/sbin/rhcrashkernel-param || :) rhgb quiet intel_iommu=off default_hugepagesz=1G transparent_hugepage=never hugepagesz=1G hugepages=64 isolcpus=1-15 nohz_full=1-15 rcu_nocbs=1-15 rcu_nocb_poll"
+GRUB_DISABLE_RECOVERY="true"

@@ -1,0 +1,1159 @@
+# © Copyright 2016 CERN
+#
+# This software is distributed under the terms of the Apache version 2
+# licence, copied verbatim in the file "LICENSE".
+#
+# In applying this licence, CERN does not waive the privileges and immunities
+# granted to it by virtue of its status as an Intergovernmental Organization 
+# or submit itself to any jurisdiction.
+#
+# Author: Grzegorz Jereczek <grzegorz.jereczek@cern.ch>
+#
+diff --git a/.travis/build.sh b/.travis/build.sh
+index e90f4d0..a17dce9 100755
+--- a/.travis/build.sh
++++ b/.travis/build.sh
+@@ -71,7 +71,7 @@ fi
+ 
+ if [ "$DPDK" ]; then
+     if [ -z "$DPDK_VER" ]; then
+-        DPDK_VER="2.0.0"
++        DPDK_VER="2.2.0"
+     fi
+     install_dpdk $DPDK_VER
+     if [ "$CC" = "clang" ]; then
+diff --git a/INSTALL.DPDK.md b/INSTALL.DPDK.md
+index 639ee37..233636b 100644
+--- a/INSTALL.DPDK.md
++++ b/INSTALL.DPDK.md
+@@ -16,7 +16,7 @@ OVS needs a system with 1GB hugepages support.
+ Building and Installing:
+ ------------------------
+ 
+-Required: DPDK 2.0
++Required: DPDK 2.2
+ Optional (if building with vhost-cuse): `fuse`, `fuse-devel` (`libfuse-dev`
+ on Debian/Ubuntu)
+ 
+@@ -24,7 +24,7 @@ on Debian/Ubuntu)
+   1. Set `$DPDK_DIR`
+ 
+      ```
+-     export DPDK_DIR=/usr/src/dpdk-2.0
++     export DPDK_DIR=/usr/src/dpdk-2.2
+      cd $DPDK_DIR
+      ```
+ 
+@@ -315,7 +315,7 @@ the vswitchd.
+ DPDK vhost:
+ -----------
+ 
+-DPDK 2.0 supports two types of vhost:
++DPDK 2.2 supports two types of vhost:
+ 
+ 1. vhost-user
+ 2. vhost-cuse
+@@ -336,7 +336,7 @@ with OVS.
+ DPDK vhost-user Prerequisites:
+ -------------------------
+ 
+-1. DPDK 2.0 with vhost support enabled as documented in the "Building and
++1. DPDK 2.2 with vhost support enabled as documented in the "Building and
+    Installing section"
+ 
+ 2. QEMU version v2.1.0+
+@@ -418,7 +418,7 @@ with OVS.
+ DPDK vhost-cuse Prerequisites:
+ -------------------------
+ 
+-1. DPDK 2.0 with vhost support enabled as documented in the "Building and
++1. DPDK 2.2 with vhost support enabled as documented in the "Building and
+    Installing section"
+    As an additional step, you must enable vhost-cuse in DPDK by setting the
+    following additional flag in `config/common_linuxapp`:
+diff --git a/acinclude.m4 b/acinclude.m4
+index 45cfaf6..0dd9412 100644
+--- a/acinclude.m4
++++ b/acinclude.m4
+@@ -172,7 +172,7 @@ AC_DEFUN([OVS_CHECK_DPDK], [
+ 
+     DPDK_INCLUDE=$RTE_SDK/include
+     DPDK_LIB_DIR=$RTE_SDK/lib
+-    DPDK_LIB="-lintel_dpdk"
++    DPDK_LIB="-ldpdk"
+     DPDK_EXTRA_LIB=""
+ 
+     AC_COMPILE_IFELSE(
+@@ -236,6 +236,35 @@ AC_DEFUN([OVS_CHECK_DPDK], [
+   AM_CONDITIONAL([DPDK_NETDEV], test -n "$RTE_SDK")
+ ])
+ 
++dnl OVS_CHECK_DAQ
++AC_DEFUN([OVS_CHECK_DAQ], [
++  AC_ARG_ENABLE([daq],
++              [AC_HELP_STRING([--enable-daq],
++                              [Use DAQ mode with DPDK])],
++              [DAQ_ENABLE=yes],
++              [DAQ_ENABLE=no])
++  AM_CONDITIONAL([DPDK_DAQ],  [test "$DAQ_ENABLE" = yes])
++  if test "$DAQ_ENABLE" = yes; then
++      AC_DEFINE([DPDK_DAQ], [1], [Enable DPDK DAQ netdev.])
++  fi
++
++])
++
++dnl
++dnl OVS_CHECK_DAQ_FC
++AC_DEFUN([OVS_CHECK_DAQ_FC], [
++  AC_ARG_ENABLE([daq-fc],
++              [AC_HELP_STRING([--enable-daq-fc],
++                              [Use DAQ mode with DPDK and flow control])],
++              [DAQ_FC_ENABLE=yes],
++              [DAQ_FC_ENABLE=no])
++  AM_CONDITIONAL([DPDK_DAQ_FC],  [test "$DAQ_FC_ENABLE" = yes])
++  if test "$DAQ_FC_ENABLE" = yes; then
++      AC_DEFINE([DPDK_DAQ_FC], [1], [Enable DPDK DAQ flow control.])
++  fi
++
++])
++
+ dnl OVS_GREP_IFELSE(FILE, REGEX, [IF-MATCH], [IF-NO-MATCH])
+ dnl
+ dnl Greps FILE for REGEX.  If it matches, runs IF-MATCH, otherwise IF-NO-MATCH.
+diff --git a/configure.ac b/configure.ac
+index e6a23a6..1903eed 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -164,6 +164,8 @@ AC_ARG_VAR(KARCH, [Kernel Architecture String])
+ AC_SUBST(KARCH)
+ OVS_CHECK_LINUX
+ OVS_CHECK_DPDK
++OVS_CHECK_DAQ
++OVS_CHECK_DAQ_FC
+ OVS_CHECK_PRAGMA_MESSAGE
+ AC_SUBST([OVS_CFLAGS])
+ AC_SUBST([OVS_LDFLAGS])
+diff --git a/lib/flow.c b/lib/flow.c
+index 5df23a9..5ad64a9 100644
+--- a/lib/flow.c
++++ b/lib/flow.c
+@@ -673,7 +673,17 @@ miniflow_extract(struct dp_packet *packet, struct miniflow *dst)
+ 
+                 miniflow_push_be32(mf, arp_tha[2], 0);
+                 miniflow_push_be32(mf, tcp_flags,
+-                                   TCP_FLAGS_BE32(tcp->tcp_ctl));
++                        /* Any change in TCP flags of a flow causes
++                         * an EMC miss, if these flags are included in
++                         * the miniflow key. Data flows in DAQ systems
++                         * (e.g. ATLAS TDAQ) are long-lived with
++                         * TCP PSH flag frequently set for TCP segment
++                         * containig the last bytes of the current event's
++                         * data pushed over the network. This does not
++                         * need to be considered by a DAQ network,
++                         * so we can force OvS to ingore the flag
++                         * in order to improve its performance */
++                                   0); //TCP_FLAGS_BE32(tcp->tcp_ctl));
+                 miniflow_push_be16(mf, tp_src, tcp->tcp_src);
+                 miniflow_push_be16(mf, tp_dst, tcp->tcp_dst);
+                 miniflow_pad_to_64(mf, igmp_group_ip4);
+diff --git a/lib/netdev-dpdk.c b/lib/netdev-dpdk.c
+index 526ffee..ddaa1dc 100644
+--- a/lib/netdev-dpdk.c
++++ b/lib/netdev-dpdk.c
+@@ -53,6 +53,9 @@
+ #include "rte_config.h"
+ #include "rte_mbuf.h"
+ #include "rte_virtio_net.h"
++#include "rte_ip.h"
++#include "rte_eth_ctrl.h"
++#include "rte_lcore.h"
+ 
+ VLOG_DEFINE_THIS_MODULE(dpdk);
+ static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 20);
+@@ -68,15 +71,24 @@ static struct vlog_rate_limit rl = VLOG_RATE_LIMIT_INIT(5, 20);
+  */
+ 
+ #define MTU_TO_MAX_LEN(mtu)  ((mtu) + ETHER_HDR_LEN + ETHER_CRC_LEN)
+-#define MBUF_SIZE(mtu)       (MTU_TO_MAX_LEN(mtu) + (512) + \
+-                             sizeof(struct rte_mbuf) + RTE_PKTMBUF_HEADROOM)
++#define MBUF_SIZE_MTU(mtu)   (MTU_TO_MAX_LEN(mtu)        \
++                              + sizeof(struct dp_packet) \
++                              + RTE_PKTMBUF_HEADROOM)
++#define MBUF_SIZE_DRIVER     (2048                       \
++                              + sizeof (struct rte_mbuf) \
++                              + RTE_PKTMBUF_HEADROOM)
++#define MBUF_SIZE(mtu)       MAX(MBUF_SIZE_MTU(mtu), MBUF_SIZE_DRIVER)
+ 
+ /* Max and min number of packets in the mempool.  OVS tries to allocate a
+  * mempool with MAX_NB_MBUF: if this fails (because the system doesn't have
+  * enough hugepages) we keep halving the number until the allocation succeeds
+  * or we reach MIN_NB_MBUF */
+ 
+-#define MAX_NB_MBUF          (4096 * 64)
++#ifdef DPDK_DAQ_MAX_NB_MBUF
++    #define MAX_NB_MBUF      DPDK_DAQ_MAX_NB_MBUF
++#else
++    #define MAX_NB_MBUF      (4096 * 64)
++#endif
+ #define MIN_NB_MBUF          (4096 * 4)
+ #define MP_CACHE_SZ          RTE_MEMPOOL_CACHE_MAX_SIZE
+ 
+@@ -90,8 +102,16 @@ BUILD_ASSERT_DECL((MAX_NB_MBUF / ROUND_DOWN_POW2(MAX_NB_MBUF/MIN_NB_MBUF))
+ 
+ #define SOCKET0              0
+ 
+-#define NIC_PORT_RX_Q_SIZE 2048  /* Size of Physical NIC RX Queue, Max (n+32<=4096)*/
+-#define NIC_PORT_TX_Q_SIZE 2048  /* Size of Physical NIC TX Queue, Max (n+32<=4096)*/
++#ifdef DPDK_DAQ_NIC_PORT_RX_Q_SIZE
++    #define NIC_PORT_RX_Q_SIZE DPDK_DAQ_NIC_PORT_RX_Q_SIZE
++#else
++    #define NIC_PORT_RX_Q_SIZE 2048  /* Size of Physical NIC RX Queue, Max (n+32<=4096)*/
++#endif
++#ifdef DPDK_DAQ_NIC_PORT_TX_Q_SIZE
++    #define NIC_PORT_TX_Q_SIZE DPDK_DAQ_NIC_PORT_TX_Q_SIZE
++#else
++    #define NIC_PORT_TX_Q_SIZE 2048  /* Size of Physical NIC TX Queue, Max (n+32<=4096)*/
++#endif
+ 
+ static char *cuse_dev_name = NULL;    /* Character device cuse_dev_name. */
+ static char *vhost_sock_dir = NULL;   /* Location of vhost-user sockets */
+@@ -109,7 +129,7 @@ static const struct rte_eth_conf port_conf = {
+         .hw_ip_checksum = 0, /* IP checksum offload disabled */
+         .hw_vlan_filter = 0, /* VLAN filtering disabled */
+         .jumbo_frame    = 0, /* Jumbo Frame Support disabled */
+-        .hw_strip_crc   = 0,
++        .hw_strip_crc   = 1,
+     },
+     .rx_adv_conf = {
+         .rss_conf = {
+@@ -125,11 +145,25 @@ static const struct rte_eth_conf port_conf = {
+ enum { MAX_TX_QUEUE_LEN = 384 };
+ enum { DPDK_RING_SIZE = 256 };
+ BUILD_ASSERT_DECL(IS_POW2(DPDK_RING_SIZE));
+-enum { DRAIN_TSC = 200000ULL };
++
++#ifdef DPDK_DAQ_DRAIN_INTERVAL_US
++    #define DRAIN_INTERVAL_US DPDK_DAQ_DRAIN_INTERVAL_US
++#else
++    #define DRAIN_INTERVAL_US 0
++#endif
++
++#ifdef DPDK_DAQ_POLL_INTERVAL_US
++    #define POLL_INTERVAL_US DPDK_DAQ_POLL_INTERVAL_US
++#else
++    #define POLL_INTERVAL_US 0
++#endif
+ 
+ enum dpdk_dev_type {
+     DPDK_DEV_ETH = 0,
+     DPDK_DEV_VHOST = 1,
++#ifdef DPDK_DAQ
++    DPDK_DEV_DAQRING = 2,
++#endif
+ };
+ 
+ static int rte_eal_init_ret = ENODEV;
+@@ -166,7 +200,10 @@ struct dpdk_tx_queue {
+                                     * from concurrent access.  It is used only
+                                     * if the queue is shared among different
+                                     * pmd threads (see 'txq_needs_locking'). */
++#if DRAIN_INTERVAL_US
+     uint64_t tsc;
++    uint64_t drain_tsc;
++#endif
+     struct rte_mbuf *burst_pkts[MAX_TX_QUEUE_LEN];
+ };
+ 
+@@ -186,6 +223,41 @@ struct dpdk_ring {
+     struct ovs_list list_node OVS_GUARDED_BY(dpdk_mutex);
+ };
+ 
++#ifdef DPDK_DAQ
++#ifndef DPDK_DAQ_RING_SIZE
++    #define DPDK_DAQ_RING_SIZE 1024
++#endif
++BUILD_ASSERT_DECL(IS_POW2(DPDK_DAQ_RING_SIZE));
++
++#define DPDK_DAQ_RING_POLL_INTERVAL_US_DEFAULT 100
++#define DPDK_DAQ_RING_MAX_BURST_DEFAULT 32
++#define DPDK_DAQ_MAX_NUMA_NODES 4
++
++/* Same as for the standard dpdk ring device. They cannot be removed,
++ * so we have to keep them around. */
++static struct ovs_list dpdk_daqring_list OVS_GUARDED_BY(dpdk_mutex)
++    = OVS_LIST_INITIALIZER(&dpdk_daqring_list);
++
++struct dpdk_daqring {
++    struct rte_ring *r[DPDK_DAQ_MAX_NUMA_NODES]; /* Single daqring is a collection of rings from each NUMA node */
++    int n_numa;
++
++    int user_port_id; /* User given port no, parsed from port name */
++    int daqring_id; /* ethernet device port id */
++
++    /* rate limitation */
++    int max_burst;
++    int curr_burst;
++    uint64_t prev_tsc;
++    uint64_t poll_tsc;
++    rte_spinlock_t rate_config_lock;
++
++    struct ovs_list list_node OVS_GUARDED_BY(dpdk_mutex);
++};
++static inline int __netdev_dpdk_daqring_send(struct netdev *netdev, struct dp_packet **pkts,
++                                             int cnt, bool may_steal);
++#endif
++
+ struct netdev_dpdk {
+     struct netdev up;
+     int port_id;
+@@ -221,6 +293,10 @@ struct netdev_dpdk {
+      * dpdk_tx_queue */
+     rte_spinlock_t vhost_tx_lock;
+ 
++#ifdef DPDK_DAQ
++    struct dpdk_daqring *daqr;
++#endif
++
+     /* virtio-net structure for vhost device */
+     OVSRCU_TYPE(struct virtio_net *) virtio_dev;
+ 
+@@ -234,6 +310,11 @@ struct netdev_dpdk {
+ struct netdev_rxq_dpdk {
+     struct netdev_rxq up;
+     int port_id;
++
++#if POLL_INTERVAL_US
++    uint64_t tsc;
++    uint64_t poll_tsc;
++#endif
+ };
+ 
+ static bool thread_is_pmd(void);
+@@ -248,6 +329,16 @@ is_dpdk_class(const struct netdev_class *class)
+     return class->construct == netdev_dpdk_construct;
+ }
+ 
++#ifdef DPDK_DAQ
++static int netdev_dpdk_daqring_construct(struct netdev *);
++
++static bool
++is_daqring_class(const struct netdev_class *class)
++{
++    return class->construct == netdev_dpdk_daqring_construct;
++}
++#endif
++
+ /* XXX: use dpdk malloc for entire OVS. in fact huge page should be used
+  * for all other segments data, bss and text. */
+ 
+@@ -521,6 +612,20 @@ dpdk_eth_dev_init(struct netdev_dpdk *dev) OVS_REQUIRES(dpdk_mutex)
+     rte_eth_promiscuous_enable(dev->port_id);
+     rte_eth_allmulticast_enable(dev->port_id);
+ 
++#ifdef DPDK_DAQ_FC
++    static struct rte_eth_fc_conf fc_conf = {
++        .autoneg    = 1,
++        .mode       = RTE_FC_RX_PAUSE,
++        .pause_time = 0x680,
++    };
++    diag = rte_eth_dev_flow_ctrl_set(dev->port_id, &fc_conf);
++    if (diag) {
++        VLOG_ERR("Interface %s flow control error: %s", dev->up.name,
++                 rte_strerror(-diag));
++        return -diag;
++    }
++#endif
++
+     memset(&eth_addr, 0x0, sizeof(eth_addr));
+     rte_eth_macaddr_get(dev->port_id, &eth_addr);
+     VLOG_INFO_RL(&rl, "Port %d: "ETH_ADDR_FMT"",
+@@ -568,6 +673,12 @@ netdev_dpdk_alloc_txq(struct netdev_dpdk *netdev, unsigned int n_txqs)
+             /* Queues are shared among CPUs. Always flush */
+             netdev->tx_q[i].flush_tx = true;
+         }
++
++        /* Calculte the drain tsc */
++#if DRAIN_INTERVAL_US
++        netdev->tx_q[i].drain_tsc = (rte_get_tsc_hz() + 1000000LL -1) / 1000000LL * DRAIN_INTERVAL_US;
++#endif
++
+         rte_spinlock_init(&netdev->tx_q[i].tx_lock);
+     }
+ }
+@@ -586,11 +697,37 @@ netdev_dpdk_init(struct netdev *netdev_, unsigned int port_no,
+ 
+     rte_spinlock_init(&netdev->stats_lock);
+ 
++#ifdef DPDK_DAQ
++    if (type == DPDK_DEV_DAQRING) {
++        struct dpdk_daqring *daqr;
++
++        LIST_FOR_EACH (daqr, list_node, &dpdk_daqring_list) {
++             if (daqr->daqring_id == port_no) {
++                 netdev->daqr = daqr;
++             }
++        }
++        if (!netdev->daqr) {
++            err = ENODEV;
++            goto unlock;
++        }
++    }
++#endif
++
+     /* If the 'sid' is negative, it means that the kernel fails
+      * to obtain the pci numa info.  In that situation, always
+      * use 'SOCKET0'. */
+     if (type == DPDK_DEV_ETH) {
+         sid = rte_eth_dev_socket_id(port_no);
++#ifdef DPDK_DAQ
++    } else if (type == DPDK_DEV_DAQRING) {
++        sid = netdev->daqr->daqring_id % ovs_numa_get_n_numas();
++        while (ovs_numa_numa_id_is_valid(sid)) {
++            if (ovs_numa_get_n_cores_on_numa(sid)) {
++                break;
++            }
++            sid++;
++        }
++#endif
+     } else {
+         sid = rte_lcore_to_socket_id(rte_get_master_lcore());
+     }
+@@ -767,11 +904,58 @@ netdev_dpdk_get_config(const struct netdev *netdev_, struct smap *args)
+     smap_add_format(args, "configured_rx_queues", "%d", netdev_->n_rxq);
+     smap_add_format(args, "requested_tx_queues", "%d", netdev_->n_txq);
+     smap_add_format(args, "configured_tx_queues", "%d", dev->real_n_txq);
++
++#ifdef DPDK_DAQ
++    if (is_daqring_class(netdev_->netdev_class)) {
++        smap_add_format(args, "numa-id", "%d", dev->socket_id);
++        smap_add_format(args, "max-burst", "%d", dev->daqr->max_burst);
++        smap_add_format(args, "poll-tsc", "%" PRIu64 "", dev->daqr->poll_tsc);
++    }
++#endif
++
+     ovs_mutex_unlock(&dev->mutex);
+ 
+     return 0;
+ }
+ 
++#ifdef DPDK_DAQ
++static int
++netdev_dpdk_set_config(struct netdev *netdev_, const struct smap *args)
++{
++    struct netdev_dpdk *dev = netdev_dpdk_cast(netdev_);
++
++    if (is_daqring_class(netdev_->netdev_class)) {
++
++        int max_burst = smap_get_int(args, "max-burst", -1);
++        if (max_burst > 0) {
++            if (max_burst > NETDEV_MAX_BURST) {
++                VLOG_WARN("max_burst too big");
++                return 0;
++            }
++            rte_spinlock_lock(&dev->daqr->rate_config_lock);
++            dev->daqr->max_burst = max_burst;
++            rte_spinlock_unlock(&dev->daqr->rate_config_lock);
++        }
++
++        int poll_tsc = smap_get_int(args, "poll-tsc", -1);
++        if (poll_tsc > 0) {
++            rte_spinlock_lock(&dev->daqr->rate_config_lock);
++            dev->daqr->poll_tsc = (uint64_t) poll_tsc;
++            rte_spinlock_unlock(&dev->daqr->rate_config_lock);
++        }
++
++    }
++
++    return 0;
++}
++#else
++static int
++netdev_dpdk_set_config(struct netdev *netdev_ OVS_UNUSED, const struct smap *args OVS_UNUSED)
++{
++    return 0;
++}
++#endif
++
+ static int
+ netdev_dpdk_get_numa_id(const struct netdev *netdev_)
+ {
+@@ -789,6 +973,7 @@ netdev_dpdk_set_multiq(struct netdev *netdev_, unsigned int n_txq,
+ {
+     struct netdev_dpdk *netdev = netdev_dpdk_cast(netdev_);
+     int err = 0;
++    int old_rxq, old_txq;
+ 
+     if (netdev->up.n_txq == n_txq && netdev->up.n_rxq == n_rxq) {
+         return err;
+@@ -799,12 +984,20 @@ netdev_dpdk_set_multiq(struct netdev *netdev_, unsigned int n_txq,
+ 
+     rte_eth_dev_stop(netdev->port_id);
+ 
++    old_txq = netdev->up.n_txq;
++    old_rxq = netdev->up.n_rxq;
+     netdev->up.n_txq = n_txq;
+     netdev->up.n_rxq = n_rxq;
+ 
+     rte_free(netdev->tx_q);
+     err = dpdk_eth_dev_init(netdev);
+     netdev_dpdk_alloc_txq(netdev, netdev->real_n_txq);
++    if (err) {
++        /* If there has been an error, it means that the requested queues
++         * have not been created.  Restore the old numbers. */
++        netdev->up.n_txq = old_txq;
++        netdev->up.n_rxq = old_rxq;
++    }
+ 
+     netdev->txq_needs_locking = netdev->real_n_txq != netdev->up.n_txq;
+ 
+@@ -843,6 +1036,11 @@ netdev_dpdk_rxq_alloc(void)
+ {
+     struct netdev_rxq_dpdk *rx = dpdk_rte_mzalloc(sizeof *rx);
+ 
++#if POLL_INTERVAL_US
++    rx->poll_tsc = (rte_get_tsc_hz() + 1000000LL -1) / 1000000LL * POLL_INTERVAL_US;
++    rx->tsc = 0;
++#endif
++
+     return &rx->up;
+ }
+ 
+@@ -889,9 +1087,13 @@ dpdk_queue_flush__(struct netdev_dpdk *dev, int qid)
+ 
+         ret = rte_eth_tx_burst(dev->port_id, qid, txq->burst_pkts + nb_tx,
+                                txq->count - nb_tx);
++
++/* Back-pressure. Wait until all packets put into tx queue*/
++#ifndef DPDK_DAQ
+         if (!ret) {
+             break;
+         }
++#endif
+ 
+         nb_tx += ret;
+     }
+@@ -910,7 +1112,9 @@ dpdk_queue_flush__(struct netdev_dpdk *dev, int qid)
+     }
+ 
+     txq->count = 0;
++#if DRAIN_INTERVAL_US
+     txq->tsc = rte_get_timer_cycles();
++#endif
+ }
+ 
+ static inline void
+@@ -978,10 +1182,21 @@ netdev_dpdk_rxq_recv(struct netdev_rxq *rxq_, struct dp_packet **packets,
+                      int *c)
+ {
+     struct netdev_rxq_dpdk *rx = netdev_rxq_dpdk_cast(rxq_);
+-    struct netdev *netdev = rx->up.netdev;
+-    struct netdev_dpdk *dev = netdev_dpdk_cast(netdev);
+     int nb_rx;
+ 
++#if POLL_INTERVAL_US
++    uint64_t curr_tsc = rte_rdtsc();
++    uint64_t diff_tsc = curr_tsc - rx->tsc;
++
++    if (diff_tsc <= rx->poll_tsc) {
++        return EAGAIN;
++    }
++    rx->tsc = curr_tsc;
++#endif
++
++#if DRAIN_INTERVAL_US
++    struct netdev *netdev = rx->up.netdev;
++    struct netdev_dpdk *dev = netdev_dpdk_cast(netdev);
+     /* There is only one tx queue for this core.  Do not flush other
+      * queues.
+      * Do not flush tx queue which is shared among CPUs
+@@ -990,6 +1205,7 @@ netdev_dpdk_rxq_recv(struct netdev_rxq *rxq_, struct dp_packet **packets,
+         OVS_LIKELY(!dev->txq_needs_locking)) {
+         dpdk_queue_flush(dev, rxq_->queue_id);
+     }
++#endif
+ 
+     nb_rx = rte_eth_rx_burst(rx->port_id, rxq_->queue_id,
+                              (struct rte_mbuf **) packets,
+@@ -1074,6 +1290,8 @@ out:
+     }
+ }
+ 
++
++#if DRAIN_INTERVAL_US
+ inline static void
+ dpdk_queue_pkts(struct netdev_dpdk *dev, int qid,
+                struct rte_mbuf **pkts, int cnt)
+@@ -1097,11 +1315,12 @@ dpdk_queue_pkts(struct netdev_dpdk *dev, int qid,
+             dpdk_queue_flush__(dev, qid);
+         }
+         diff_tsc = rte_get_timer_cycles() - txq->tsc;
+-        if (diff_tsc >= DRAIN_TSC) {
++        if (diff_tsc >= txq->drain_tsc) {
+             dpdk_queue_flush__(dev, qid);
+         }
+     }
+ }
++#endif
+ 
+ /* Tx function. Transmit packets indefinitely */
+ static void
+@@ -1163,9 +1382,20 @@ dpdk_do_tx_copy(struct netdev *netdev, int qid, struct dp_packet **pkts,
+ 
+     if (dev->type == DPDK_DEV_VHOST) {
+         __netdev_dpdk_vhost_send(netdev, (struct dp_packet **) mbufs, newcnt, true);
++#ifdef DPDK_DAQ
++    } else if (dev->type == DPDK_DEV_DAQRING) {
++        __netdev_dpdk_daqring_send(netdev, (struct dp_packet **) mbufs, newcnt, true);
++#endif
+     } else {
++#if DRAIN_INTERVAL_US
+         dpdk_queue_pkts(dev, qid, mbufs, newcnt);
+         dpdk_queue_flush(dev, qid);
++#else
++        i = 0;
++        while (newcnt-i != 0) {
++            i += rte_eth_tx_burst(dev->port_id, qid, &mbufs[i], newcnt-i);
++        }
++#endif
+     }
+ 
+     if (!thread_is_pmd()) {
+@@ -1223,9 +1453,16 @@ netdev_dpdk_send__(struct netdev_dpdk *dev, int qid,
+ 
+             if (OVS_UNLIKELY(size > dev->max_packet_len)) {
+                 if (next_tx_idx != i) {
++#if DRAIN_INTERVAL_US
+                     dpdk_queue_pkts(dev, qid,
+                                     (struct rte_mbuf **)&pkts[next_tx_idx],
+                                     i-next_tx_idx);
++#else
++                    while (i-next_tx_idx != 0) {
++                        next_tx_idx += rte_eth_tx_burst(dev->port_id, qid, (struct rte_mbuf **)&pkts[next_tx_idx],
++                                               i-next_tx_idx);
++                    }
++#endif
+                 }
+ 
+                 VLOG_WARN_RL(&rl, "Too big size %d max_packet_len %d",
+@@ -1237,9 +1474,19 @@ netdev_dpdk_send__(struct netdev_dpdk *dev, int qid,
+             }
+         }
+         if (next_tx_idx != cnt) {
++#if DRAIN_INTERVAL_US
+            dpdk_queue_pkts(dev, qid,
+                             (struct rte_mbuf **)&pkts[next_tx_idx],
+                             cnt-next_tx_idx);
++#else
++            while (cnt-next_tx_idx != 0) {
++                next_tx_idx += rte_eth_tx_burst(dev->port_id, qid, (struct rte_mbuf **)&pkts[next_tx_idx],
++                                       cnt-next_tx_idx);
++                if (cnt-next_tx_idx != 0) {
++                    VLOG_WARN("tx queue full port %d qid %d lcore_id %d", dev->port_id, qid, rte_lcore_id());
++                }
++            }
++#endif
+         }
+ 
+         if (OVS_UNLIKELY(dropped)) {
+@@ -1313,6 +1560,12 @@ netdev_dpdk_set_mtu(const struct netdev *netdev, int mtu)
+     struct dpdk_mp *old_mp;
+     struct dpdk_mp *mp;
+ 
++#ifdef DPDK_DAQ
++    if (dev->type == DPDK_DEV_DAQRING) {
++        return 0;
++    }
++#endif
++
+     ovs_mutex_lock(&dpdk_mutex);
+     ovs_mutex_lock(&dev->mutex);
+     if (dev->mtu == mtu) {
+@@ -1566,6 +1819,19 @@ netdev_dpdk_update_flags__(struct netdev_dpdk *dev,
+             rte_eth_promiscuous_enable(dev->port_id);
+         }
+ 
++#ifdef DPDK_DAQ
++        /* flow control */
++        static struct rte_eth_fc_conf fc_conf = {
++        .autoneg    = 1,
++        .mode       = RTE_FC_RX_PAUSE,
++        .pause_time = 0x680,
++        };
++        err = rte_eth_dev_flow_ctrl_set(dev->port_id, &fc_conf);
++        if (err)
++            return -err;
++#endif
++
++
+         if (!(dev->flags & NETDEV_UP)) {
+             rte_eth_dev_stop(dev->port_id);
+         }
+@@ -1679,6 +1945,86 @@ netdev_dpdk_set_admin_state(struct unixctl_conn *conn, int argc,
+     unixctl_command_reply(conn, "OK");
+ }
+ 
++#ifdef DPDK_DAQ
++static void
++netdev_dpdk_daqring_set_poll_tsc(struct unixctl_conn *conn, int argc,
++                                      const char *argv[], void *aux OVS_UNUSED)
++{
++    struct netdev *netdev;
++    struct netdev_dpdk *dev;
++    struct dpdk_daqring *daqr;
++    uint64_t poll_tsc;
++
++    poll_tsc = atoi(argv[argc - 1]);
++
++    ovs_mutex_lock(&dpdk_mutex);
++    if (argc > 2) {
++        netdev = netdev_from_name(argv[1]);
++        if (netdev && is_daqring_class(netdev->netdev_class)) {
++            dev = netdev_dpdk_cast(netdev);
++        } else {
++            unixctl_command_reply_error(conn, "Not a DPDK daqring Interface");
++            netdev_close(netdev);
++            ovs_mutex_unlock(&dpdk_mutex);
++            return;
++        }
++        daqr = dev->daqr;
++        rte_spinlock_lock(&daqr->rate_config_lock);
++        daqr->poll_tsc = poll_tsc;
++        rte_spinlock_unlock(&daqr->rate_config_lock);
++    } else {
++        LIST_FOR_EACH (daqr, list_node, &dpdk_daqring_list) {
++            rte_spinlock_lock(&daqr->rate_config_lock);
++            daqr->poll_tsc = poll_tsc;
++            rte_spinlock_unlock(&daqr->rate_config_lock);
++        }
++    }
++    ovs_mutex_unlock(&dpdk_mutex);
++    unixctl_command_reply(conn, "OK");
++}
++
++static void
++netdev_dpdk_daqring_set_max_burst(struct unixctl_conn *conn, int argc,
++                                  const char *argv[], void *aux OVS_UNUSED)
++{
++    struct netdev *netdev;
++    struct netdev_dpdk *dev;
++    struct dpdk_daqring *daqr;
++    int max_burst;
++
++    max_burst = atoi(argv[argc -1]);
++    if (max_burst > NETDEV_MAX_BURST) {
++        unixctl_command_reply_error(conn, "max_burst too big");
++        return;
++    }
++
++    ovs_mutex_lock(&dpdk_mutex);
++    if (argc > 2) {
++        netdev = netdev_from_name(argv[1]);
++        if (netdev && is_daqring_class(netdev->netdev_class)) {
++            dev = netdev_dpdk_cast(netdev);
++        } else {
++            unixctl_command_reply_error(conn, "Not a DPDK daqring Interface");
++            netdev_close(netdev);
++            ovs_mutex_unlock(&dpdk_mutex);
++            return;
++        }
++        daqr = dev->daqr;
++        rte_spinlock_lock(&daqr->rate_config_lock);
++        daqr->max_burst = max_burst;
++        rte_spinlock_unlock(&daqr->rate_config_lock);
++    } else {
++        LIST_FOR_EACH (daqr, list_node, &dpdk_daqring_list) {
++            rte_spinlock_lock(&daqr->rate_config_lock);
++            daqr->max_burst = max_burst;
++            rte_spinlock_unlock(&daqr->rate_config_lock);
++        }
++    }
++    ovs_mutex_unlock(&dpdk_mutex);
++    unixctl_command_reply(conn, "OK");
++}
++#endif
++
+ /*
+  * Set virtqueue flags so that we do not receive interrupts.
+  */
+@@ -1832,7 +2178,14 @@ dpdk_common_init(void)
+     unixctl_command_register("netdev-dpdk/set-admin-state",
+                              "[netdev] up|down", 1, 2,
+                              netdev_dpdk_set_admin_state, NULL);
+-
++#ifdef DPDK_DAQ
++    unixctl_command_register("netdev-dpdk-daqring/set-poll-tsc",
++                             "[dpdkdaqr] new-poll-tsc", 1, 2,
++                             netdev_dpdk_daqring_set_poll_tsc, NULL);
++    unixctl_command_register("netdev-dpdk-daqring/set-max-burst",
++                             "[dpdkdaqr] new-max-burst", 1, 2,
++                             netdev_dpdk_daqring_set_max_burst, NULL);
++#endif
+     ovs_thread_create("dpdk_watchdog", dpdk_watchdog, NULL);
+ }
+ 
+@@ -1962,6 +2315,309 @@ unlock_dpdk:
+     return err;
+ }
+ 
++#ifdef DPDK_DAQ
++static int
++dpdk_daqring_create(const char dev_name[], unsigned int port_no, unsigned int *daqring_id) OVS_REQUIRES(dpdk_mutex)
++{
++    struct dpdk_daqring *daqr;
++    int i;
++    char subring_name[RTE_RING_NAMESIZE];
++
++    daqr = dpdk_rte_mzalloc(sizeof *daqr);
++    if (daqr == NULL) {
++        return ENOMEM;
++    }
++
++    /* Create multi producer single consumer rings on each NUMA node,
++     * netdev locks will not be used.
++     * Single daqring corresponds to single output port,
++     * so single consumer is assumed here. */
++    daqr->n_numa = ovs_numa_get_n_numas();
++    if (daqr->n_numa == OVS_NUMA_UNSPEC) {
++        daqr->n_numa = 1;
++    }
++    for (i = 0; i < daqr->n_numa; i++) {
++        snprintf(subring_name, RTE_RING_NAMESIZE, "%s_numa%d", dev_name, i);
++        daqr->r[i] = rte_ring_create(subring_name, DPDK_DAQ_RING_SIZE, i, RING_F_SC_DEQ);
++        if (daqr->r[i] == NULL) {
++            rte_free(daqr);
++            return ENOMEM;
++        }
++    }
++
++    daqr->user_port_id = port_no;
++    daqr->daqring_id = list_size(&dpdk_daqring_list);
++    list_push_back(&dpdk_daqring_list, &daqr->list_node);
++
++    daqr->max_burst = DPDK_DAQ_RING_MAX_BURST_DEFAULT;
++    daqr->poll_tsc = (rte_get_tsc_hz() + 1000000LL -1) / 1000000LL * DPDK_DAQ_RING_POLL_INTERVAL_US_DEFAULT;
++    daqr->prev_tsc = 0;
++    rte_spinlock_init(&daqr->rate_config_lock);
++
++    *daqring_id = daqr->daqring_id;
++    return 0;
++}
++
++static int
++dpdk_daqring_open(const char dev_name[], unsigned int *daqring_id) OVS_REQUIRES(dpdk_mutex)
++{
++    struct dpdk_daqring *daqr;
++    unsigned int port_no;
++    int err = 0;
++
++    /* Names always start with "dpdkdaqr" followed by port number */
++    err = dpdk_dev_parse_name(dev_name, "dpdkdaqr", &port_no);
++    if (err) {
++        return err;
++    }
++
++    /* look through our list to find the device */
++    LIST_FOR_EACH (daqr, list_node, &dpdk_daqring_list) {
++        if (daqr->user_port_id == port_no) {
++            VLOG_INFO("Found dpdk daqring device %s:", dev_name);
++            *daqring_id = daqr->daqring_id; /* really all that is needed */
++            return 0;
++        }
++    }
++
++    /* Need to create the device ring */
++    return dpdk_daqring_create(dev_name, port_no, daqring_id);
++}
++
++static int
++netdev_dpdk_daqring_construct(struct netdev *netdev)
++{
++    unsigned int daqring_id = 0;
++    int err = 0;
++
++    if (rte_eal_init_ret) {
++        return rte_eal_init_ret;
++    }
++
++    ovs_mutex_lock(&dpdk_mutex);
++
++    err = dpdk_daqring_open(netdev->name, &daqring_id);
++    if (err) {
++        goto unlock_dpdk;
++    }
++
++    err = netdev_dpdk_init(netdev, daqring_id, DPDK_DEV_DAQRING);
++
++unlock_dpdk:
++    ovs_mutex_unlock(&dpdk_mutex);
++    return err;
++}
++
++static void
++netdev_dpdk_daqring_destruct(struct netdev *netdev_)
++{
++    struct netdev_dpdk *dev = netdev_dpdk_cast(netdev_);
++
++    ovs_mutex_lock(&dpdk_mutex);
++    list_remove(&dev->list_node);
++    ovs_mutex_unlock(&dpdk_mutex);
++}
++
++static int
++netdev_dpdk_daqring_set_multiq(struct netdev *netdev_, unsigned int n_txq,
++                               unsigned int n_rxq)
++{
++    struct netdev_dpdk *netdev = netdev_dpdk_cast(netdev_);
++    int err = 0;
++
++    if (netdev->up.n_txq == n_txq && netdev->up.n_rxq == n_rxq) {
++        return err;
++    }
++
++    ovs_mutex_lock(&dpdk_mutex);
++    ovs_mutex_lock(&netdev->mutex);
++
++    /* all of the queues are fake */
++    netdev->up.n_txq = n_txq;
++    netdev->real_n_txq = 1;
++    netdev->up.n_rxq = 1;
++
++    ovs_mutex_unlock(&netdev->mutex);
++    ovs_mutex_unlock(&dpdk_mutex);
++
++    return err;
++}
++
++static int
++__netdev_dpdk_daqring_send(struct netdev *netdev_, struct dp_packet **pkts,
++                           int cnt, bool may_steal)
++{
++    struct netdev_dpdk *netdev = netdev_dpdk_cast(netdev_);
++    unsigned i;
++    int dropped = 0;
++    unsigned subring_id;
++    unsigned nb_enq;
++
++    /* Reset the rss hash, so that the emc lookup after
++     * dequeuing from the daqring does not update the emc.
++     * This would cause emc cache bouncing because of multiple
++     * rules for the same flow. */
++    for (i = 0; i < cnt; i++) {
++        dp_packet_set_rss_hash(pkts[i], 0);
++        /* Packets will enter the datapath again,
++         * so they cannot be treated as coming from the wire */
++        pkts[i]->md.recirc_id++;
++    }
++
++    /* subrings are associated to NUMA nodes */
++    subring_id = rte_lcore_to_socket_id(rte_lcore_id());
++    nb_enq = rte_ring_enqueue_burst(netdev->daqr->r[subring_id], (void **) pkts, cnt);
++
++    rte_spinlock_lock(&netdev->stats_lock);
++    netdev->stats.tx_packets += nb_enq;
++    rte_spinlock_unlock(&netdev->stats_lock);
++
++    if (may_steal) {
++        for (i = 0; i < cnt - nb_enq; i++) {
++            dp_packet_delete(pkts[i]);
++            dropped++;
++        }
++
++        if (OVS_UNLIKELY(dropped)) {
++            rte_spinlock_lock(&netdev->stats_lock);
++            netdev->stats.tx_dropped += dropped;
++            rte_spinlock_unlock(&netdev->stats_lock);
++        }
++    }
++
++    return 0;
++}
++
++static int
++netdev_dpdk_daqring_send(struct netdev *netdev, int qid OVS_UNUSED,
++                         struct dp_packet **pkts, int cnt, bool may_steal)
++{
++    unsigned i;
++
++    if (OVS_UNLIKELY(!may_steal ||
++                     pkts[0]->source != DPBUF_DPDK)) {
++        dpdk_do_tx_copy(netdev, qid, pkts, cnt);
++
++        if (may_steal) {
++            for (i = 0; i < cnt; i++) {
++                dp_packet_delete(pkts[i]);
++            }
++        }
++    } else {
++        __netdev_dpdk_daqring_send(netdev, pkts, cnt, may_steal);
++    }
++
++    return 0;
++}
++
++static int
++netdev_dpdk_daqring_get_stats(const struct netdev *netdev,
++                              struct netdev_stats *stats)
++{
++    struct netdev_dpdk *dev = netdev_dpdk_cast(netdev);
++
++    ovs_mutex_lock(&dev->mutex);
++    memset(stats, 0, sizeof(*stats));
++    /* Unsupported Stats */
++    stats->rx_errors = UINT64_MAX;
++    stats->tx_errors = UINT64_MAX;
++    stats->multicast = UINT64_MAX;
++    stats->collisions = UINT64_MAX;
++    stats->rx_crc_errors = UINT64_MAX;
++    stats->rx_fifo_errors = UINT64_MAX;
++    stats->rx_frame_errors = UINT64_MAX;
++    stats->rx_length_errors = UINT64_MAX;
++    stats->rx_missed_errors = UINT64_MAX;
++    stats->rx_over_errors = UINT64_MAX;
++    stats->tx_aborted_errors = UINT64_MAX;
++    stats->tx_carrier_errors = UINT64_MAX;
++    stats->tx_errors = UINT64_MAX;
++    stats->tx_fifo_errors = UINT64_MAX;
++    stats->tx_heartbeat_errors = UINT64_MAX;
++    stats->tx_window_errors = UINT64_MAX;
++    stats->rx_bytes += UINT64_MAX;
++    stats->tx_bytes += UINT64_MAX;
++
++    rte_spinlock_lock(&dev->stats_lock);
++    /* Supported Stats */
++    stats->rx_packets += dev->stats.rx_packets;
++    stats->rx_dropped += dev->stats.rx_dropped;
++    stats->tx_packets += dev->stats.tx_packets;
++    stats->tx_dropped += dev->stats.tx_dropped;
++    rte_spinlock_unlock(&dev->stats_lock);
++    ovs_mutex_unlock(&dev->mutex);
++
++    return 0;
++}
++
++static int
++netdev_dpdk_daqring_get_status(const struct netdev *netdev_, struct smap *args)
++{
++    struct netdev_dpdk *dev = netdev_dpdk_cast(netdev_);
++
++    if (dev->port_id < 0)
++        return ENODEV;
++
++    smap_add_format(args, "port_no", "%d", dev->port_id);
++
++    return 0;
++}
++
++static int
++netdev_dpdk_daqring_rxq_recv(struct netdev_rxq *rxq_, struct dp_packet **packets,
++                             int *c)
++{
++    struct netdev_rxq_dpdk *rx = netdev_rxq_dpdk_cast(rxq_);
++    struct netdev *netdev = rx->up.netdev;
++    struct netdev_dpdk *dev = netdev_dpdk_cast(netdev);
++    int nb_rx = 0, nb_rx_i, burst;
++    int i;
++    uint64_t poll;
++
++    rte_spinlock_lock(&dev->daqr->rate_config_lock);
++    poll = dev->daqr->poll_tsc;
++    burst = dev->daqr->max_burst;
++    rte_spinlock_unlock(&dev->daqr->rate_config_lock);
++
++    if (poll > 0) {
++        uint64_t curr_tsc = rte_rdtsc();
++        uint64_t diff_tsc = curr_tsc - dev->daqr->prev_tsc;
++        if (diff_tsc > poll) {
++            /* Polling interval elapsed. Max burst can be reset */
++            dev->daqr->prev_tsc = curr_tsc;
++            dev->daqr->curr_burst = burst;
++        }
++        if (dev->daqr->curr_burst <= 0) {
++            /* Cannot dequeue any packets at this time */
++            return EAGAIN;
++        }
++    } else {
++        /* Polling interval is not defined. Always dequeue max burst */
++        dev->daqr->curr_burst = burst;
++    }
++
++    for (i = 0; i < dev->daqr->n_numa; i++) {
++        nb_rx_i = rte_ring_dequeue_burst(dev->daqr->r[i], (void **) (packets + nb_rx), dev->daqr->curr_burst);
++        nb_rx += nb_rx_i;
++        dev->daqr->curr_burst -= nb_rx_i;
++        if (dev->daqr->curr_burst <= 0) {
++            break;
++        }
++    }
++    if (!nb_rx) {
++        return EAGAIN;
++    }
++
++    rte_spinlock_lock(&dev->stats_lock);
++    dev->stats.rx_packets += nb_rx;
++    rte_spinlock_unlock(&dev->stats_lock);
++
++    *c = nb_rx;
++
++    return 0;
++}
++#endif
++
+ #define NETDEV_DPDK_CLASS(NAME, INIT, CONSTRUCT, DESTRUCT, MULTIQ, SEND, \
+     GET_CARRIER, GET_STATS, GET_FEATURES, GET_STATUS, RXQ_RECV)          \
+ {                                                             \
+@@ -1975,7 +2631,7 @@ unlock_dpdk:
+     DESTRUCT,                                                 \
+     netdev_dpdk_dealloc,                                      \
+     netdev_dpdk_get_config,                                   \
+-    NULL,                       /* netdev_dpdk_set_config */  \
++    netdev_dpdk_set_config,                                   \
+     NULL,                       /* get_tunnel_config */       \
+     NULL,                       /* build header */            \
+     NULL,                       /* push header */             \
+@@ -2177,6 +2833,22 @@ static const struct netdev_class OVS_UNUSED dpdk_vhost_user_class =
+         NULL,
+         netdev_dpdk_vhost_rxq_recv);
+ 
++#ifdef DPDK_DAQ
++const struct netdev_class dpdk_daqring_class =
++    NETDEV_DPDK_CLASS(
++        "dpdkdaqr",
++        NULL,
++        netdev_dpdk_daqring_construct,
++        netdev_dpdk_daqring_destruct,
++        netdev_dpdk_daqring_set_multiq,
++        netdev_dpdk_daqring_send,
++        NULL,
++        netdev_dpdk_daqring_get_stats,
++        NULL,
++        netdev_dpdk_daqring_get_status,
++        netdev_dpdk_daqring_rxq_recv);
++#endif
++
+ void
+ netdev_dpdk_register(void)
+ {
+@@ -2195,6 +2867,9 @@ netdev_dpdk_register(void)
+ #else
+         netdev_register_provider(&dpdk_vhost_user_class);
+ #endif
++#ifdef DPDK_DAQ
++        netdev_register_provider(&dpdk_daqring_class);
++#endif
+         ovsthread_once_done(&once);
+     }
+ }
+diff --git a/lib/netdev.c b/lib/netdev.c
+index 186c1e2..d6b8cd3 100644
+--- a/lib/netdev.c
++++ b/lib/netdev.c
+@@ -112,7 +112,8 @@ netdev_is_pmd(const struct netdev *netdev)
+     return (!strcmp(netdev->netdev_class->type, "dpdk") ||
+             !strcmp(netdev->netdev_class->type, "dpdkr") ||
+             !strcmp(netdev->netdev_class->type, "dpdkvhostcuse") ||
+-            !strcmp(netdev->netdev_class->type, "dpdkvhostuser"));
++            !strcmp(netdev->netdev_class->type, "dpdkvhostuser")) ||
++            !strcmp(netdev->netdev_class->type, "dpdkdaqr");
+ }
+ 
+ static void

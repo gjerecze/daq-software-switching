@@ -1,0 +1,36 @@
+diff --git a/southbound/southbound-api/src/main/yang/ovsdb.yang b/southbound/southbound-api/src/main/yang/ovsdb.yang
+index 9d8b8a2..67943a4 100755
+--- a/southbound/southbound-api/src/main/yang/ovsdb.yang
++++ b/southbound/southbound-api/src/main/yang/ovsdb.yang
+@@ -698,6 +698,11 @@ module ovsdb {
+         base interface-type-base;
+     }
+ 
++    identity interface-type-dpdkdaqr {
++        description "Interface type for dpdk daqring interfaces";
++        base interface-type-base;
++    }
++
+     identity interface-type-stt {
+         description "Interface type for stt interfaces";
+         base interface-type-base;
+diff --git a/southbound/southbound-impl/src/main/java/org/opendaylight/ovsdb/southbound/SouthboundConstants.java b/southbound/southbound-impl/src/main/java/org/opendaylight/ovsdb/southbound/SouthboundConstants.java
+index d577ed4..851b88a 100755
+--- a/southbound/southbound-impl/src/main/java/org/opendaylight/ovsdb/southbound/SouthboundConstants.java
++++ b/southbound/southbound-impl/src/main/java/org/opendaylight/ovsdb/southbound/SouthboundConstants.java
+@@ -24,6 +24,7 @@ import org.opendaylight.yang.gen.v1.urn.opendaylight.params.xml.ns.yang.ovsdb.re
+ import org.opendaylight.yang.gen.v1.urn.opendaylight.params.xml.ns.yang.ovsdb.rev150105.InterfaceTypeDpdkr;
+ import org.opendaylight.yang.gen.v1.urn.opendaylight.params.xml.ns.yang.ovsdb.rev150105.InterfaceTypeDpdkvhost;
+ import org.opendaylight.yang.gen.v1.urn.opendaylight.params.xml.ns.yang.ovsdb.rev150105.InterfaceTypeDpdkvhostuser;
++import org.opendaylight.yang.gen.v1.urn.opendaylight.params.xml.ns.yang.ovsdb.rev150105.InterfaceTypeDpdkdaqr;
+ import org.opendaylight.yang.gen.v1.urn.opendaylight.params.xml.ns.yang.ovsdb.rev150105.InterfaceTypeStt;
+ import org.opendaylight.yang.gen.v1.urn.opendaylight.params.xml.ns.yang.ovsdb.rev150105.OvsdbBridgeProtocolBase;
+ import org.opendaylight.yang.gen.v1.urn.opendaylight.params.xml.ns.yang.ovsdb.rev150105.OvsdbBridgeProtocolOpenflow10;
+@@ -98,6 +99,7 @@ public class SouthboundConstants {
+             .put("dpdkr", InterfaceTypeDpdkr.class)
+             .put("dpdkvhost", InterfaceTypeDpdkvhost.class)
+             .put("dpdkvhostuser", InterfaceTypeDpdkvhostuser.class)
++            .put("dpdkdaqr", InterfaceTypeDpdkdaqr.class)
+             .put("stt", InterfaceTypeStt.class)
+             .build();
+ 
